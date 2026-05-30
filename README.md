@@ -55,8 +55,9 @@ Open Claude Code in this directory and tell it:
 > Then follow `spec/README.md` § "Implementation Plan": six modules,
 > one agent per module, **spawn all six in a single message**. Kick
 > `npm install` in the background the moment `package.json` lands.
-> Verify with typecheck ∥ build (concurrent) → preview + `npm run
-> smoke` → `npm run serve:phone` printing the QR.
+> Verify with typecheck ∥ build (concurrent) → `npm run smoke` (it
+> boots and tears down its own preview) → `npm run serve:phone`
+> printing the QR.
 
 The agent will write `src/`, `package.json`, the Vite/Tailwind/TS
 configs, `scripts/serve-phone.mjs`, and `scripts/smoke.mjs`. None of
@@ -72,7 +73,7 @@ npm run build
 npm run serve:phone
 ```
 
-`serve:phone` boots a local preview at `http://localhost:4173`, opens
+`serve:phone` boots a local preview at `http://localhost:41730`, opens
 a Cloudflare tunnel to it, and prints a QR code in the terminal whose
 payload is the public `https://*.trycloudflare.com` URL.
 
@@ -102,7 +103,7 @@ can be shut down and the app keeps working offline on the phone.
   captive-portal Wi-Fi networks block `*.trycloudflare.com`. Switch
   to mobile data.
 - **No install prompt even though the URL loads.** PWAs need HTTPS.
-  A raw LAN address like `http://192.168.x.x:4173` won't prompt —
+  A raw LAN address like `http://192.168.x.x:41730` won't prompt —
   always go through the tunnel.
 - **`npm run dev` shows no install banner.** The service worker is
   disabled in dev (`devOptions.enabled: false`). Use

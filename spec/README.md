@@ -25,10 +25,29 @@ If you find this repetitive, that is the intent.
 
 The **main agent** — the interactive coding agent the user opened in
 the repo (Claude Code or equivalent) — owns this final step. Subagents
-do not run `serve:phone`. The main agent runs it **in the foreground**
-so its stdout (which contains the QR) reaches the user's terminal.
-Backgrounding the process, redirecting its output, or wrapping it in
-a captured-output harness all defeat the deliverable.
+do not run `serve:phone`. **The main agent is responsible for making
+the complete QR visible to the user: it must render the entire QR
+block (every row, untruncated) and the `*.trycloudflare.com` URL
+beneath it in its own reply — not merely let `serve:phone`'s output
+scroll past in a tool buffer.** A truncated, summarized, or "see
+above" QR **has not shipped**. The process must also stay alive (tunnel
+up) until the user stops it.
+
+One invariant, two runtimes. The invariant: the full QR ends up in
+front of the user, and the tunnel stays up until they install.
+- **At a human terminal:** run `serve:phone` in the **foreground**,
+  attached, with stdout not redirected away, so the QR renders
+  directly to the screen. Stay attached until Ctrl-C.
+- **In an agent / automation harness (no shared terminal):** the main
+  agent **captures** `serve:phone`'s output, waits for the QR and URL
+  to appear, **reprints the entire QR block verbatim** in its reply,
+  and leaves the process running so the tunnel stays up. Capturing the
+  output is **required** here, not forbidden — it is the only way the
+  QR reaches the user.
+
+What defeats the deliverable is the QR never becoming fully visible to
+the user, a truncated QR, or the tunnel being torn down before the
+user has installed.
 
 ## Core User Story
 
@@ -66,8 +85,9 @@ unverified, you skipped the gates.
    scan and the app will load, but the "Install app" affordance
    never appears. PNG is mandatory; SVG is fine as a supplementary
    `<link rel="icon">` and apple-touch-icon.
-9. `node scripts/smoke.mjs` against the running preview server adds,
-   completes, and deletes a todo. Exit code 0.
+9. `node scripts/smoke.mjs` — which frees its own dedicated port
+   42730 (never 41730) and boots and tears down its own preview server
+   there — adds, completes, and deletes a todo. Exit code 0.
 10. `npm run serve:phone` produces exactly one terminal QR and one
     `https://*.trycloudflare.com` URL underneath it. The script
     always runs `npm run build` first (never serve stale), then
@@ -204,6 +224,7 @@ todos/
       styles.css            # Tailwind directives + CSS variables
 
   scripts/
+    free-port.mjs           # freePort(port) helper + `npm run clean` CLI
     serve-phone.mjs         # build + preview + pre-flight + cloudflared + QR
     smoke.mjs               # headless smoke (puppeteer-core)
 
@@ -233,7 +254,7 @@ npm run serve:phone
 
 1. Always runs `npm run build` first. The user may have edited the
    spec since the last run — never serve a stale `dist/`.
-2. Boots `vite preview` on port 4173.
+2. Boots `vite preview` on port 41730.
 3. Polls until the local server responds.
 4. **Pre-flight:** fetches `/`, `/manifest.webmanifest`, and every
    icon URL from the manifest. All must return 200, the manifest must
@@ -241,7 +262,7 @@ npm run serve:phone
    any pre-flight check fails, the script aborts with a one-line
    message and never opens the tunnel — there is no broken QR to
    scan.
-5. Boots `cloudflared tunnel --url http://localhost:4173`.
+5. Boots `cloudflared tunnel --url http://localhost:41730`.
 6. Watches cloudflared's stdout for a `https://*.trycloudflare.com`
    URL. Captures the first one.
 7. Renders that URL as a terminal QR via `qrcode-terminal`, prints
@@ -301,7 +322,7 @@ contact with the user. Subagents do not run `serve:phone`.
 | **domain** | `src/domain/` | `errors.ts`, `ids.ts`, `types.ts`, `rules.ts`, `index.ts` (5) | § "Domain Layer" | All 5 exist. Barrel re-exports the other four. Zero DOM / React / Dexie imports. |
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | § "Data Layer" + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
 | **ui** | `src/App.tsx`, `src/main.tsx`, `src/ui/` | `App.tsx`, `main.tsx`, `ui/styles.css`, `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/todo-row.tsx`, `ui/todo-form.tsx`, `ui/todo-app.tsx` (8) | § "Frontend" (Selector Contract is binding) | All 8 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. |
-| **scripts** | `scripts/` | `serve-phone.mjs`, `smoke.mjs` (2) | § "Infrastructure", § "Selector Contract" | Both exist. `serve-phone.mjs` = build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **scripts** | `scripts/` | `free-port.mjs`, `serve-phone.mjs`, `smoke.mjs` (3) | § "Infrastructure", § "Selector Contract" | All three exist. `free-port.mjs` exports `freePort(port)` (bind-probe → tree-kill any listener) and also runs as a CLI; both `serve-phone` and `smoke` import it. `serve-phone.mjs` frees **port 41730** first, then build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` runs on its **own dedicated port 42730 (never 41730)** — frees it, boots and tears down its own preview — and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | § "Icons" | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
 | **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | § "Tech Stack", § "Infrastructure" | All 6 exist. `package.json` dependency list matches the infrastructure spec exactly. |
 
@@ -330,15 +351,29 @@ Write.)
    and `npm run build`. Both must pass. This is where the modules
    connect: any cross-module type mismatch surfaces here, not at
    write time.
-6. **Smoke.** Boot `npm run preview` in the background; run
-   `npm run smoke`; assert exit 0.
-7. **Ship.** Run `npm run serve:phone` **in the foreground.** Do not
-   background it, do not redirect its stdout, do not wrap it in a
-   harness that captures output. The script's stdout *is* the QR;
-   backgrounding it means the QR never reaches the user's terminal.
-   The main agent stays attached to the script until the user
-   terminates it with Ctrl-C. **Do not declare success until the user
-   has confirmed the QR is on screen.** See § "Deliverable".
+6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
+   runs on its **own dedicated port (42730), never 41730**: it frees
+   42730 and boots **and tears down** its own preview there
+   (free → preview → puppeteer → tree-kill), so the orchestrator does
+   **not** start a preview for it. There is no `npm run preview &`
+   step — that stray ampersand is what orphaned a port and blocked the
+   next run. Because smoke never touches 41730, the smoke gate and the
+   final serve step can never contend for the deliverable port.
+7. **Ship.** Run `npm run serve:phone`. Its stdout carries the QR. The
+   main agent must get the **complete** QR in front of the user and
+   keep the tunnel up — see § "Deliverable" for the invariant and the
+   two runtime modes:
+   - **At a human terminal:** run it in the **foreground**, attached,
+     stdout not redirected, and stay attached until Ctrl-C.
+   - **In an agent harness (no shared TTY):** start it, watch its
+     output until the `*.trycloudflare.com` URL and QR block appear,
+     then **reprint the entire QR block (all rows) and the URL verbatim
+     in your reply**, and leave the process running so the tunnel stays
+     up.
+
+   Either way: never tear the process down before the user has
+   installed, and never show a partial or truncated QR. **Do not
+   declare success until the full QR is on screen in your reply.**
 
 ## MVP Cut
 
@@ -1133,19 +1168,19 @@ every transcription risk a richer mark would introduce.
 
 ##### How the PNGs land on disk
 
-The icons agent writes one file — `scripts/make-icons.mjs` (verbatim
-from the code block below) — then runs `node scripts/make-icons.mjs`.
+The icons agent writes one file — `public/icons/make-icons.mjs` (verbatim
+from the code block below) — then runs `node public/icons/make-icons.mjs`.
 The script emits both PNGs at the canonical paths and exits. No
 dependency, no rasterizer, no base64. The PNGs are pure Node output:
 PNG signature + IHDR (grayscale, 8-bit) + zlib-deflated IDAT scanlines
 + IEND, with a 256-entry CRC32 table computed inline.
 
 ```js
-// scripts/make-icons.mjs
+// public/icons/make-icons.mjs
 //
 // Pure-Node PNG writer for two solid-color icons. Reads nothing,
 // pulls no rasterizer dependency. The icons agent writes this file
-// from the spec, then runs `node scripts/make-icons.mjs`. The two
+// from the spec, then runs `node public/icons/make-icons.mjs`. The two
 // PNGs land at `public/icons/icon-192.png` and
 // `public/icons/icon-512.png`.
 
@@ -1217,9 +1252,9 @@ them.
 
 ##### What the icons agent does
 
-1. Write `scripts/make-icons.mjs` to disk, verbatim from the block
+1. Write `public/icons/make-icons.mjs` to disk, verbatim from the block
    above.
-2. Run `node scripts/make-icons.mjs` once. The PNGs appear at
+2. Run `node public/icons/make-icons.mjs` once. The PNGs appear at
    `public/icons/icon-192.png` and `public/icons/icon-512.png`.
 3. Exit.
 
@@ -1327,16 +1362,28 @@ this layer. Component tests are optional and not required for delivery.
   "scripts": {
     "dev":         "vite",
     "build":       "vite build",
-    "preview":     "vite preview --host 0.0.0.0 --port 4173",
+    "preview":     "vite preview --host 0.0.0.0 --port 41730 --strictPort",
     "typecheck":   "tsc --noEmit",
     "serve:phone": "node scripts/serve-phone.mjs",
-    "smoke":       "node scripts/smoke.mjs"
+    "smoke":       "node scripts/smoke.mjs",
+    "clean":       "node scripts/free-port.mjs 41730"
   }
 }
 ```
 
+**Ports 41730 (serve) and 42730 (smoke) are project-reserved and
+deliberately not Vite's defaults (5173 dev, 4173 preview)** — that is
+what lets `free-port.mjs` treat any listener on them as a stale prior
+run, with no need to fingerprint the process (§ "Port reclaim —
+`free-port.mjs`"). `preview` runs with `--strictPort` so an occupied
+port is a hard error rather than a silent bump to the next port.
+`clean` (`node scripts/free-port.mjs 41730`) is the manual
+port-reclaim escape hatch for the deliverable port; `serve:phone`
+frees 41730 automatically on start and `smoke` frees its own 42730, so
+you rarely need it by hand.
+
 No `prebuild`. The PNG icons are not generated at build time — they
-are emitted by the `icons` agent's helper (`scripts/make-icons.mjs`,
+are emitted by the `icons` agent's helper (`public/icons/make-icons.mjs`,
 specified verbatim in § "Icons"). The agent
 writes the helper once and runs it once. Nothing rasterizes during
 `npm run build`.
@@ -1417,7 +1464,7 @@ export default defineConfig({
   server:  { host: '0.0.0.0', port: 5173 },
   preview: {
     host: '0.0.0.0',
-    port: 4173,
+    port: 41730,
     // Vite 5 preview rejects unknown Host headers by default. The
     // cloudflared tunnel rewrites the Host to *.trycloudflare.com,
     // which would trip "Blocked request. This host is not allowed."
@@ -1434,7 +1481,7 @@ export default defineConfig({
 
 `scripts/` does not own icon generation. The two PNGs Chrome's
 installability check requires (`/icons/icon-192.png`,
-`/icons/icon-512.png`) are emitted by `scripts/make-icons.mjs`, a
+`/icons/icon-512.png`) are emitted by `public/icons/make-icons.mjs`, a
 pure-Node helper specified in full in § "Icons". The `icons` agent
 writes the helper once from the spec
 and runs it once. No `prebuild` hook, no puppeteer rasterization, no
@@ -1479,17 +1526,31 @@ above resolve to whichever side of the media query is active.
 
 ### Install flow — `serve:phone`
 
-`scripts/serve-phone.mjs` is the **only** install-flow artefact. It
-contains the orchestration, the pre-flight validation, and the QR
+`scripts/serve-phone.mjs` is the **only** install-flow orchestrator
+(it imports the shared `freePort` helper from `free-port.mjs`).
+It contains the orchestration, the pre-flight validation, and the QR
 print. There is no second test script. If the QR prints, the install
 path is good; if any pre-flight check fails, the QR never prints and
 the implementer sees a one-line error.
 
-**Must run in the foreground.** The script's QR output is rendered to
-stdout via `qrcode-terminal`. If the main agent backgrounds the
-process or routes its stdout through a non-terminal pipe, the QR is
-not visible to the user. Run it as a foreground command, attached to
-the user's terminal, until the user terminates with Ctrl-C.
+**Surfacing the QR — the deliverable is that the *full* QR reaches the
+user.** The script renders the QR to stdout via `qrcode-terminal`; how
+the main agent gets it in front of the user depends on the runtime
+(see § "Deliverable"):
+
+- **At a human terminal:** run it in the **foreground**, attached, with
+  stdout not redirected away, until the user terminates with Ctrl-C.
+  The QR renders directly to the screen.
+- **In an agent / automation harness (no shared terminal):** the main
+  agent **captures** the script's stdout, waits for the QR and the
+  `*.trycloudflare.com` URL to appear, **reprints the complete QR block
+  (every row) and the URL verbatim** in its reply, and leaves the
+  process running so the tunnel stays up. Capturing the output is
+  required here — it is the only path by which the QR reaches the user.
+
+Either way the QR must appear **in full**. A discarded, piped-away,
+truncated, or summarized QR **has not shipped**, and the tunnel must
+stay up until the user has installed.
 
 The user-side narrative (which phone browser, install gesture) is in
 § "Phone side — what the user does beyond scanning."
@@ -1497,18 +1558,148 @@ Operator-facing troubleshooting (tunnel caveats, Wi-Fi blocks, etc.)
 is in the root `README.md` § "Troubleshooting" and is not spec
 material.
 
+#### Port reclaim — `free-port.mjs`
+
+`scripts/free-port.mjs` exports `freePort(port)` and also runs as a
+CLI (`node scripts/free-port.mjs 41730`, wired to `npm run clean`).
+`freePort` is a **parameterised** helper — the port is an argument,
+not a hard-coded constant — so each caller frees only its own port.
+
+**The ports are project-reserved (41730 serve, 42730 smoke), so any
+listener is a stale prior run.** Because these are uncommon, fixed
+ports — *not* Vite's shared defaults (5173 dev, 4173 preview) — nothing
+else on the machine is expected to bind them. `freePort` therefore does
+**not** fingerprint the process ("is this one *ours*?"). It frees the
+port and lets the caller proceed. This is the whole simplification: the
+old `reclaimPort` spawned a PowerShell `Get-CimInstance` per PID and ran
+a `vite`/`cloudflared`/project-path heuristic purely to avoid killing an
+unrelated app on the *shared* default port 4173. Reserving distinctive
+ports removes that need, and with it the per-PID process inspection, the
+`{ reclaimed, foreign, free }` contract, and the `foreign`-vs-`free`
+branching footgun.
+
+**41730 is freed in exactly one place: `serve-phone.mjs`, as its first
+action.** It is the single install-flow orchestrator, run by the main
+agent as the **last** step of a run, so all handling of the deliverable
+port lives at the end, in the one step that owns serving. `smoke.mjs`
+does **not** touch 41730 — it runs against its own dedicated port
+**42730** (§ "Smoke test"), calling `freePort(42730)` as its first
+action. Decoupling the ports means the smoke gate and the final serve
+can never contend for the same port.
+
+`freePort(port)` — returns `Promise<boolean>` (`true` once the port is
+bindable, `false` if something still holds it):
+
+1. **Probe first (cheap, common case).** Try to bind the port in-process
+   (`net.createServer().listen({ port, host: '0.0.0.0' })`). If it binds,
+   close it and return `true` immediately — **no subprocess is spawned
+   when the port is already free.** This is the dominant path.
+2. **Only if occupied:** find the listener PID(s). Windows: parse
+   `netstat -ano -p TCP` (exact-port match on the LISTENING rows); POSIX:
+   `lsof -ti tcp:<port> -sTCP:LISTEN`.
+3. Kill each PID's whole **tree** — `taskkill /pid <pid> /T /F` on
+   Windows; process-group `SIGKILL` on POSIX. Log each killed PID
+   (`[free-port] killing pid <pid> on :<port>`) so the action is visible.
+4. Poll the bind-probe (≈100 ms × up to ~3 s) until the socket releases.
+   Return `true` when bindable, `false` on timeout.
+
+**Canonical primitives — transcribe these two.** The bind-probe and the
+`netstat`/`lsof` parse are the bug-prone, non-obvious core (exact-port
+match across IPv4/IPv6 forms, LISTENING-only); re-deriving them is what
+makes this otherwise-tiny file slow to write. The rest of `freePort` —
+wiring probe → `pidsOnPort` → `taskkill /T /F` → re-poll, and the CLI
+wrapper — is mechanical and follows the prose above.
+
+```js
+import net from 'node:net'
+import { execSync } from 'node:child_process'
+
+// Probe: can this port be bound right now? No subprocess. The common path.
+function canBind(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer()
+    srv.once('error', () => resolve(false))
+    srv.once('listening', () => srv.close(() => resolve(true)))
+    srv.listen({ port, host: '0.0.0.0' })
+  })
+}
+
+// Listener PIDs on the EXACT port. Match the port as a number (not a
+// substring), LISTENING state only, across IPv4 (0.0.0.0:/127.0.0.1:)
+// and IPv6 ([::]:) local-address forms.
+function pidsOnPort(port) {
+  const pids = new Set()
+  if (process.platform === 'win32') {
+    let out = ''
+    try { out = execSync('netstat -ano -p TCP', { encoding: 'utf8' }) } catch { return [] }
+    for (const line of out.split(/\r?\n/)) {
+      const m = line.trim().match(/^TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)$/i)
+      if (m && Number(m[1]) === port) pids.add(Number(m[2]))
+    }
+  } else {
+    try {
+      const out = execSync(`lsof -ti tcp:${port} -sTCP:LISTEN`, { encoding: 'utf8' })
+      for (const tok of out.split(/\s+/)) if (tok) pids.add(Number(tok))
+    } catch { /* no listener */ }
+  }
+  return [...pids]
+}
+```
+
+**Callers guard on the boolean.** The correct usage is:
+
+```js
+if (!(await freePort(PORT))) {
+  // something still holds the port — abort with the pre-flight message
+}
+```
+
+There is no array to misread; the single boolean is the whole contract.
+
+This is what makes `--strictPort` safe to keep: a stale preview from a
+prior run is freed automatically before the bind, and if `freePort` ever
+*can't* clear the port, the subsequent `vite preview --strictPort` fails
+fast with `Port <n> is in use` — that hard error **is** the fallback, so
+the script never silently bumps to the next port. **Free-on-start, not
+teardown-on-exit, is the durable fix** — it does not depend on the
+previous run having shut down cleanly (a hard kill, a closed terminal,
+or a closed editor / agent session all skip exit teardown; the next run
+frees the port regardless).
+
 #### Behaviour
 
+0. **Free the port.** Before anything else, `if (!(await
+   freePort(41730))) abort` (§ "Port reclaim"). After this, 41730 is
+   bindable; if `freePort` returned `false` something still holds it, so
+   abort immediately with `[serve:phone] pre-flight failed: port 41730 is
+   occupied by another process — stop it and retry` and never build or
+   open the tunnel.
 1. **Build.** Always run `npm run build` as a subprocess and wait
    for exit 0 before continuing. Stream its output. If build fails,
    exit non-zero with the build's exit code and a one-line hint. The
    user may have edited the spec since the last run — never serve a
    stale `dist/`.
 2. **Boot preview.** `spawn('npm', ['run', 'preview'])` (the project's
-   own preview script, so port/host stay consistent).
-3. **Wait for localhost.** Poll `http://localhost:4173/` with `fetch`
-   until it returns 200. Time out at 30 s with a clear error.
-4. **Pre-flight.** Run, against `http://localhost:4173`, in order:
+   own preview script, so port/host stay consistent). The preview
+   script runs `vite preview --port 41730 --strictPort` so an occupied
+   port is a hard error instead of a silent bump to the next port. Step
+   0 already freed the port, so if the preview child still emits `Port
+   41730 is in use` (or never reports listening on 41730 within the
+   timeout), abort with `[serve:phone] pre-flight failed: port 41730 is
+   occupied by another process — stop it and retry` and never open the
+   tunnel. The tunnel and pre-flight target the same port the preview
+   actually bound.
+3. **Wait for localhost.** Poll `http://localhost:41730/` with `fetch`
+   until it returns 200 — **the fetch is the sole readiness signal.**
+   Time out at 30 s with a clear error. Do **not** gate readiness on
+   parsing the preview's stdout: Vite prints its `Local:` line with ANSI
+   color codes (`localhost:\x1b[1m41730\x1b[22m`), so a literal
+   `localhost:41730` substring match is unreliable and has falsely failed
+   otherwise-healthy runs with a 30 s timeout. You may still watch stdout
+   for a `Port 41730 is in use` line as an early fail-fast per step 2, but
+   the *absence* of a ready line is never itself a failure — only the
+   `fetch` timeout is.
+4. **Pre-flight.** Run, against `http://localhost:41730`, in order:
    - **`GET /`** → 200, body contains `<link rel="manifest"`.
    - **`GET /manifest.webmanifest`** → 200, response is JSON, parsed
      manifest contains:
@@ -1522,7 +1713,7 @@ material.
      send `SIGTERM` to the preview child, exit code 1. Do not start
      the tunnel.
 5. **Boot tunnel.** `spawn('cloudflared', ['tunnel', '--url',
-   'http://localhost:4173'])`.
+   'http://localhost:41730'])`.
 6. **Capture URL.** Pipe cloudflared's stdout and stderr. On each
    line, test against the regex
    `https:\/\/[a-z0-9.-]+\.trycloudflare\.com`. On the first match,
@@ -1539,8 +1730,65 @@ material.
      Android: Chrome → Install banner, or menu → Install app
      ```
 8. Forward all child output to this process's stdout/stderr.
-9. On `SIGINT` / `SIGTERM`: send `SIGTERM` to both children, then
-   exit.
+9. **Teardown — kill the whole tree.** Spawn the preview and tunnel so
+   the whole tree can be torn down: track each child's PID. On `SIGINT`
+   / `SIGTERM` (and on any fatal path that calls the script's
+   `fail()`), kill the **process tree**, not just the direct child:
+   - **Windows:** `spawn('taskkill', ['/pid', String(child.pid), '/T',
+     '/F'])` — `/T` kills the child and all descendants.
+   - **POSIX:** spawn the child with `detached: true`, then
+     `process.kill(-child.pid, 'SIGTERM')` to signal the whole process
+     group.
+
+   The intended stop is **Ctrl-C in the foreground terminal**; after
+   it, no `vite`/`cloudflared`/`node` process from this run remains and
+   port 41730 is free.
+
+**Canonical pre-flight (step 4) — transcribe this.** The icon-size
+matching (`sizes` is a space-separated token list, not a substring) and
+the relative-URL resolution against the manifest are the parts that are
+easy to get subtly wrong; the surrounding orchestration (build, spawn,
+capture, QR) is standard and stays prose. Throw a one-line reason; the
+caller prints `[serve:phone] pre-flight failed: <reason>`, SIGTERMs the
+preview, and exits 1 before any tunnel opens.
+
+```js
+async function preflight(base) {
+  const root = await fetch(base + '/')
+  if (!root.ok) throw new Error(`GET / -> ${root.status}`)
+  if (!/<link[^>]+rel=["']?manifest/i.test(await root.text()))
+    throw new Error('index.html has no <link rel="manifest">')
+
+  const res = await fetch(base + '/manifest.webmanifest')
+  if (!res.ok) throw new Error(`manifest -> ${res.status}`)
+  let m
+  try { m = JSON.parse(await res.text()) } catch { throw new Error('manifest is not valid JSON') }
+  if (!m.name) throw new Error('manifest.name is empty')
+  if (!m.start_url) throw new Error('manifest.start_url missing')
+  if (m.display !== 'standalone') throw new Error("manifest.display must be 'standalone'")
+
+  const icons = m.icons ?? []
+  const has = (s) => icons.some((i) => String(i.sizes || '').split(/\s+/).includes(s))
+  if (!has('192x192')) throw new Error('manifest has no 192x192 icon')
+  if (!has('512x512')) throw new Error('manifest has no 512x512 icon')
+
+  for (const icon of icons) {
+    const url = new URL(icon.src, base + '/manifest.webmanifest').href
+    const r = await fetch(url)
+    if (!r.ok) throw new Error(`icon ${icon.src} -> ${r.status}`)
+  }
+}
+```
+
+   **Exit teardown is best-effort; free-on-start is the guarantee.**
+   A hard kill of this process — or closing the terminal, editor, or
+   agent session that owns it — skips these handlers, and on Windows
+   the `vite`/`cloudflared` grandchildren are not in a kill-on-close
+   job, so they can survive as orphans holding 41730. That is tolerated:
+   step 0's `freePort` clears them on the next run before binding.
+   Do **not** rely on exit teardown alone to keep successive runs
+   unblocked — that is exactly the assumption that left the port busy
+   before.
 
 The script must work on Windows (PowerShell), macOS, and Linux. Use
 `shell: true` when spawning `npm run preview` and `npm run build` so
@@ -1562,7 +1810,7 @@ removed because:
 - The implementer would write two install-flow scripts in a one-shot
   run instead of one.
 - The checks it ran (manifest reachable, icons 200, root references
-  manifest) all pass identically against `localhost:4173` — there is
+  manifest) all pass identically against `localhost:41730` — there is
   no `trycloudflare.com`-specific failure mode that matters at this
   scope (service-worker registration works on `localhost` and on
   HTTPS tunnel equally).
@@ -1577,7 +1825,18 @@ can be reintroduced. Until then, one script is enough.
 ### Smoke test — `scripts/smoke.mjs`
 
 The smoke test is the verification oracle for success criteria #1–#9
-in § "Success Criteria". Run it against a running preview server.
+in § "Success Criteria". It **owns its own preview lifecycle on a
+dedicated port — 42730, never 41730**: on start it `if (!(await
+freePort(42730))) abort`, spawns its own preview bound to 42730 (`vite
+preview --host 0.0.0.0 --port 42730 --strictPort` directly — *not* `npm
+run preview`, which is hard-wired to the deliverable port 41730), waits
+for 42730 to answer 200, runs the puppeteer steps below, and on exit
+(success, failure, or signal) tears the preview down with the same
+tree-kill as `serve-phone.mjs`. It never frees or binds 41730 — the
+deliverable port belongs to the final serve step alone (§ "Port
+reclaim"). The orchestrator must **not** start a preview for it — there
+is no `npm run preview &` step, and that stray ampersand was the orphan
+that left a port busy.
 
 **Selector contract.** Every selector and assertion below maps 1:1 to
 the table in § "Selector Contract." That
@@ -1587,11 +1846,16 @@ contract disagree, the contract wins and the script is wrong.
 
 Behaviour:
 
+0. `if (!(await freePort(42730))) abort`, then spawn `vite preview
+   --host 0.0.0.0 --port 42730 --strictPort`, poll
+   `http://localhost:42730/` until 200 (30 s timeout), and register a
+   tree-kill teardown that fires on every exit path. (Port 42730, never
+   41730 — see § "Port reclaim".)
 1. Launch `puppeteer-core` against the system Chrome.
    Default path on Windows:
    `C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe`.
    Override with `CHROME_PATH`.
-2. `page.goto('http://localhost:4173')`.
+2. `page.goto('http://localhost:42730')`.
 3. Delete IndexedDB `todos-app` and reload, so each run is
    deterministic.
 4. Wait for the Add button (see Selector Contract).
@@ -1611,6 +1875,27 @@ Behaviour:
 10. Exit 0 if every step held; exit 1 otherwise. Any `pageerror` or
     non-`ERR_ABORTED` `requestfailed` fails the run.
 
+**Canonical step 5 — the React-controlled date input. Transcribe this.**
+A raw `el.value = …` is overwritten on React's next render, so the typed
+date never reaches state and the todo is created with the wrong (or no)
+due date — a silent smoke failure. Set via the native prototype setter,
+then dispatch the events React listens for. This is the one puppeteer
+step with a non-obvious form; every other step follows directly from the
+Selector Contract and needs no canonical block.
+
+```js
+await page.$eval(
+  'input[aria-label="Due date"]',
+  (el, value) => {
+    const set = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set
+    set.call(el, value)
+    el.dispatchEvent(new Event('input', { bubbles: true }))
+    el.dispatchEvent(new Event('change', { bubbles: true }))
+  },
+  dueDate, // 'YYYY-MM-DD', today + 7 days
+)
+```
+
 The script is the contract between the spec and any implementer:
 "does the prototype work?" is answered by this exit code. The
 selectors above are exact and must match § "Selector Contract"
@@ -1622,7 +1907,7 @@ verbatim.
 |---|---|---|
 | Types | `npm run typecheck` | Must pass |
 | Build | `npm run build` | Must pass |
-| Smoke | `npm run smoke` (after `npm run preview &`) | Must pass |
+| Smoke | `npm run smoke` (boots and tears down its own preview) | Must pass |
 | Install flow | `npm run serve:phone` prints a QR | Must pass |
 | Bundle size | check `dist/` | < 250 KB gzipped JS |
 | Lighthouse PWA | manual, Chrome DevTools | "Installable" — PNG icons present, SW registered, manifest valid. If Lighthouse marks the site "Not installable" the manifest icons are almost certainly still SVG; check `dist/icons/*.png`. |
@@ -1647,12 +1932,7 @@ jobs:
       - run: npm ci
       - run: npm run typecheck
       - run: npm run build
-      - run: npm run preview &
-      - run: |
-          for i in $(seq 1 30); do
-            curl -sf http://localhost:4173 && break || sleep 1
-          done
-      - run: npm run smoke
+      - run: npm run smoke   # boots and tears down its own preview
 ```
 
 ### Boundary Rules
