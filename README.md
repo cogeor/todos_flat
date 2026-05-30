@@ -52,9 +52,12 @@ Open Claude Code in this directory and tell it:
 > Do NOT read any `.md` at repo root other than this one — they are
 > not for implementers.
 >
-> Then follow `spec/README.md` § "Implementation Plan": six modules,
-> one agent per module, **spawn all six in a single message**. Kick
-> `npm install` in the background the moment `package.json` lands.
+> Then follow `spec/README.md` § "Implementation Plan": nine agents
+> (the `ui` work splits in two and the `scripts` work splits three
+> ways so the heaviest work doesn't gate the batch), **spawn all nine
+> in a single message**. You write **no files yourself** — every file,
+> `package.json` included, belongs to an agent. Kick `npm install` in
+> the background the moment `package.json` lands.
 > Verify with typecheck ∥ build (concurrent) → `npm run smoke` (it
 > boots and tears down its own preview) → `npm run serve:phone`
 > printing the QR.

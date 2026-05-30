@@ -296,39 +296,76 @@ blocking trycloudflare, etc.) live in the root `README.md`
 
 ## Implementation Plan
 
-The work partitions into **six independent modules**. Each module is
-one agent. The six agents **parallelize** — they run concurrently,
-have no execution order between them, and never wait on each other.
-Within each module, the agent **fans out** its file writes: every
-file the module owns is emitted in a single message with parallel
-Write calls. There is no internal ordering inside a module either.
+The work partitions into **nine independent agents**. They
+**parallelize** — they run concurrently, have no execution order
+between them, and never wait on each other. Within each agent, it
+**fans out** its file writes: every file it owns is emitted in a
+single message with parallel Write calls. There is no internal
+ordering either.
 
-**This is a spec, not code.** TypeScript only resolves at the verify
-step at the end of the run. Until then, every module is just files on
-disk in a separate folder. Two agents writing files in different
-folders cannot conflict, so they fan out concurrently.
+The partition is balanced for **wall-clock**, not just for tidy
+ownership. The batch finishes only when its *slowest* agent returns,
+so the two heaviest concerns — the UI screen and the install scripts —
+are split so that no single long agent gates everything. `ui` splits
+into a **view** agent (markup + the binding Selector Contract) and a
+**state** agent (hooks + styles). `scripts` splits **three** ways:
+`free-port` owns the shared `free-port.mjs` helper, `serve-phone` owns
+the install-flow orchestrator, and `smoke` owns the test. Carving
+`free-port` out gives the one file *imported by two other agents* a
+single owner instead of leaving the `freePort` helper implicit across
+`serve-phone` and `smoke` (see § "Port reclaim — `free-port.mjs`").
+The helper itself is small — a bind-probe plus a kill-the-listener
+fallback on project-reserved ports — so this agent is no longer the
+long pole; it must **not** pad its runtime by spinning up live servers
+to test itself.
 
-The **main agent** does not write source files. It is the interactive
+**This is a spec, not code.** TypeScript only resolves when types and
+the build are checked at the end of the run. Until then, every agent is
+just files on disk. The conflict boundary is the **file**, not the
+folder: two agents writing *different files* — even in the same folder
+— cannot conflict. That is exactly what lets the heavy folders
+(`src/ui/`, `scripts/`) be split across more agents for more
+parallelism.
+
+The **main agent** writes **no files at all**. It is the interactive
 coding agent the user opened in the repo (Claude Code or equivalent).
-Its job: read the spec, spawn the six module agents, kick `npm install`
-in the background, run the final verification chain, and run
-`npm run serve:phone` so the QR appears in its own terminal — in
-contact with the user. Subagents do not run `serve:phone`.
+Every file the run produces — all of `src/`, the root configs,
+`scripts/`, `public/`, and `package.json` itself — belongs to the
+module agents (`package.json` is the `configs` agent's, alongside the
+other root configs). The main agent's job is: read the spec, spawn the
+nine module agents, kick `npm install` in the background the moment
+`package.json` lands on disk (see § "Main-agent orchestration",
+step 3), run the final verification chain, and run `npm run serve:phone`
+so the QR appears in its own terminal — in contact with the user.
+Subagents do not run `serve:phone`. This is a hard rule. A run where
+the main agent wrote **any** file itself has failed the orchestration
+contract even if every gate passes and the QR prints.
 
-### The six modules
+### The nine agents
 
 | Agent | Owns | Files | Reads | Done when |
 |---|---|---|---|---|
 | **domain** | `src/domain/` | `errors.ts`, `ids.ts`, `types.ts`, `rules.ts`, `index.ts` (5) | § "Domain Layer" | All 5 exist. Barrel re-exports the other four. Zero DOM / React / Dexie imports. |
 | **data** | `src/data/` | `db.ts`, `todo-repository.ts`, `index.ts` (3) | § "Data Layer" + domain types | All 3 exist. Repository exposes `list` / `create` / `setStatus` / `delete`. No Dexie types leak through the barrel. |
-| **ui** | `src/App.tsx`, `src/main.tsx`, `src/ui/` | `App.tsx`, `main.tsx`, `ui/styles.css`, `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/todo-row.tsx`, `ui/todo-form.tsx`, `ui/todo-app.tsx` (8) | § "Frontend" (Selector Contract is binding) | All 8 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. |
-| **scripts** | `scripts/` | `free-port.mjs`, `serve-phone.mjs`, `smoke.mjs` (3) | § "Infrastructure", § "Selector Contract" | All three exist. `free-port.mjs` exports `freePort(port)` (bind-probe → tree-kill any listener) and also runs as a CLI; both `serve-phone` and `smoke` import it. `serve-phone.mjs` frees **port 41730** first, then build + pre-flight + cloudflared + exactly one QR print. `smoke.mjs` runs on its **own dedicated port 42730 (never 41730)** — frees it, boots and tears down its own preview — and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
+| **ui-view** | `src/App.tsx`, `src/main.tsx`, `src/ui/*.tsx` | `App.tsx`, `main.tsx`, `ui/todo-app.tsx`, `ui/todo-row.tsx`, `ui/todo-form.tsx` (5) | § "Frontend" (whole section; Selector Contract is binding) | All 5 exist. Selectors, aria-labels, and DOM shape match § "Selector Contract" **verbatim** — smoke asserts literal strings. Imports the hooks + styles owned by **ui-state**. |
+| **ui-state** | `src/ui/` hooks + styles | `ui/use-todos.ts`, `ui/use-install-prompt.ts`, `ui/styles.css` (3) | § "Frontend" (Hook, Styling, Install button) | All 3 exist. `use-todos` exposes list/create/setStatus/delete; `use-install-prompt` exposes `{ canInstall, promptInstall }`; `styles.css` has the Tailwind directives + the CSS variables the tokens resolve against. |
+| **free-port** | `scripts/free-port.mjs` | `free-port.mjs` (1) | § "Port reclaim — `free-port.mjs`" | Exists. Exports `freePort(port): Promise<boolean>` — bind-probes the port first (no subprocess when already free), and only if occupied finds the listener PID(s) and tree-kills them, returning `true` once bindable. Ports are project-reserved, so there is no "ours vs foreign" fingerprinting. Also runs as a CLI (`node scripts/free-port.mjs <port>`). Single owner of the `freePort` helper that `serve-phone` and `smoke` both import. **Just write the file from the spec — do NOT spawn live test servers to self-verify; the end-of-run typecheck/build/smoke chain validates it.** |
+| **serve-phone** | `scripts/serve-phone.mjs` | `serve-phone.mjs` (1) | § "Infrastructure" | Exists. **Sole owner of port 41730** — imports `freePort` from `free-port.mjs`, then `if (!(await freePort(41730))) abort`, builds, pre-flights, opens the tunnel, and prints exactly one QR. No other script touches 41730. |
+| **smoke** | `scripts/smoke.mjs` | `smoke.mjs` (1) | § "Infrastructure", § "Selector Contract" | Exists. Runs on its **own dedicated port (42730), never 41730**: imports `freePort` from `free-port.mjs`, `if (!(await freePort(42730))) abort`, **boots and tears down its own preview** there (spawns `vite preview --port 42730 --strictPort` directly), and uses the native `HTMLInputElement` value setter for the React date input (`Object.getOwnPropertyDescriptor(proto, 'value').set` — direct `.value =` is swallowed by React). |
 | **icons** | `public/icons/` | `make-icons.mjs` (writes itself, then runs to produce `icon-192.png` + `icon-512.png`) | § "Icons" | `make-icons.mjs` exists and has been run. `icon-192.png` and `icon-512.png` exist at the right path. Both PNGs decode at the exact pixel dimensions. The agent writes the helper from the spec, runs it once, and is done. |
-| **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | § "Tech Stack", § "Infrastructure" | All 6 exist. `package.json` dependency list matches the infrastructure spec exactly. |
+| **configs** | repo root | `package.json`, `tsconfig.json`, `vite.config.ts`, `tailwind.config.ts`, `postcss.config.cjs`, `index.html` (6) | § "Tech Stack", § "Infrastructure" | All 6 exist. `package.json` matches the dependency + script surface in § "package.json scripts" and § "Dependencies" exactly. |
 
-**Total: 26 files across 6 parallel agents.** (The icons module
+**Total: 26 files across the nine parallel agents.** (The icons agent
 writes 1 helper plus 2 generated PNGs; only the helper is an agent
 Write.)
+
+The split groups (`ui-view`/`ui-state`, and `free-port`/`serve-phone`/
+`smoke`) share import edges but never a file, so they fan out with zero
+conflict risk; imports resolve at the typecheck/build step like every
+other cross-agent edge. `serve-phone` and `smoke` both import `freePort`
+from the `free-port` agent's file — that edge resolves at typecheck/build
+time exactly like the others, and because `free-port` owns the helper,
+neither importer has to reimplement it.
 
 ### Main-agent orchestration
 
@@ -338,19 +375,28 @@ Write.)
    Hand each module agent the section named in its "Reads" column —
    an agent needs only its own section, not the whole spec. The point
    is to keep each agent's context tight at spawn time.
-2. **Spawn the modules.** In one message, spawn all 6 module agents
+2. **Spawn the agents.** In one message, spawn all nine module agents
    with parallel Agent calls. Hand each agent its row from the table
-   above.
-3. **Install in the background.** The moment `package.json` exists on
-   disk, kick `npm install` as a background command. It takes 30–90 s
-   and runs concurrently with the module agents. If the harness can't
-   watch for the file landing, kick `npm install` immediately after
-   step 2 — it waits for `package.json` to appear on its own.
-4. **Wait** for all 6 module agents and `npm install` to return.
-5. **Verify — concurrent.** In one message, run `npm run typecheck`
-   and `npm run build`. Both must pass. This is where the modules
-   connect: any cross-module type mismatch surfaces here, not at
-   write time.
+   above. The main agent writes nothing itself.
+3. **Start install when `package.json` lands.** The `configs` agent
+   writes `package.json`; the moment it exists on disk, kick
+   `npm install` as a background command so it overlaps the rest of the
+   batch — `npm install` is the longest fixed cost in the run. If the
+   harness can't watch for the file landing, kick `npm install` right
+   after spawning the agents — it waits for `package.json` to appear on
+   its own.
+4. **Wait for the batch — it is asynchronous.** The nine agents run
+   concurrently and each can take **several minutes**; the batch is done
+   only when **every** agent has returned its report. Wait on those
+   reports — do **not** infer progress by polling the filesystem. A
+   missing, empty, or half-written tree mid-run is **normal**: it means
+   agents are still working, not that they failed. Do **not** start
+   writing module files yourself because files "aren't there yet" — that
+   is the single most common way this run goes wrong (see § "Recovery").
+5. **Verify — types + build.** Run `npm run typecheck` and
+   `npm run build` (these may run concurrently). Both must pass. This is
+   where the modules connect: any cross-module type mismatch, missing
+   file, or wrong import surfaces here, not at write time.
 6. **Smoke.** Run `npm run smoke`; assert exit 0. The smoke script
    runs on its **own dedicated port (42730), never 41730**: it frees
    42730 and boots **and tears down** its own preview there
@@ -374,6 +420,36 @@ Write.)
    Either way: never tear the process down before the user has
    installed, and never show a partial or truncated QR. **Do not
    declare success until the full QR is on screen in your reply.**
+
+### Recovery — when an agent fails or output looks wrong
+
+The steps above are the happy path. The moment reality deviates, there is
+exactly one correct response, and one tempting wrong one. **The wrong one
+— the main agent picking up a module and implementing it inline — is what
+fails the orchestration contract** (the main agent writes no files
+itself; see the start of § "Implementation Plan"). Do not take it, even
+under time pressure, even if it looks faster.
+
+- **An agent is slow or silent.** It is still working (§ step 4). Wait.
+  Do not implement its files.
+- **An agent returns an error, times out, or reports a question.**
+  Re-read the relevant section, then **re-dispatch that one agent** with
+  the error or the answer. Re-running one agent is cheap; becoming the
+  implementer is not.
+- **typecheck or build fails (a type mismatch, a missing file, an
+  unexpected import, or an invented path).** This is a cross-module
+  contract gap, not a cue to rewrite a module by hand. Identify the
+  owning agent from the table and re-dispatch it with the error. If an
+  agent invented a file the partition does not include, delete the stray
+  file and re-dispatch the owning agent with its exact file list — do
+  not "adopt" the invented layout.
+
+Never substitute a different design (a different storage layer, an extra
+feature, renamed selectors) for what an agent was supposed to produce —
+the smoke test's Selector Contract and the Non-Goals list are binding, and
+a hand-substituted module silently breaks both.
+
+**Shell discipline (Windows).** Don't hand-roll readiness or port-check shell commands — the scripts own that lifecycle; and never pipe PowerShell syntax (`for (…)`, `Invoke-WebRequest`) into a bash shell or vice-versa. Run every command from the repo root (the cloned `todos/` directory, where `package.json` lives) — not its parent — so `npm install` / `build` / `smoke` resolve `package.json` without a `--prefix` and don't fire twice.
 
 ## MVP Cut
 
